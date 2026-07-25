@@ -135,6 +135,11 @@ async def get_profile(request):
     return err or JSONResponse(data)
 
 
+async def get_debug_battery(request):
+    err, data = await _guard(_client(request).debug_battery(request.path_params["bike_id"]))
+    return err or JSONResponse(data)
+
+
 async def get_stats(request):
     err, data = await _guard(_client(request).stats(request.path_params["bike_id"]))
     return err or JSONResponse(data)
@@ -289,6 +294,7 @@ routes = [
     Route("/api/bikes", list_bikes),
     Route("/api/bikes/{bike_id}/battery", get_battery),
     Route("/api/bikes/{bike_id}/profile", get_profile),
+    Route("/api/bikes/{bike_id}/debug/battery", get_debug_battery),
     Route("/api/bikes/{bike_id}/stats", get_stats),
     Route("/api/bikes/{bike_id}/rides", get_rides),
     Route("/api/bikes/{bike_id}/rides/{aid}.gpx", get_ride_gpx),

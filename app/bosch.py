@@ -140,7 +140,11 @@ class BoschClient:
         if not prof:
             raise BoschError(404, "bike not found")
         a = prof["data"]["attributes"]
-        bat = (a.get("batteries") or [{}])[0]
+        # A bike can carry more than one pack (e.g. Bosch DualBattery). Bosch lists
+        # each pack separately under `batteries`; earlier this only read [0], which
+        # under-reported capacity/lifetime and hid the second pack entirely.
+        bats = a.get("batteries") or []
+        bat = bats[0] if bats else {}          # for the SoC field fallbacks below
         du = a.get("driveUnit") or {}
         modes = du.get("driveUnitAssistModes") or []
         # range per mode: soc.reachableRange aligns with the non-off assist modes
@@ -150,20 +154,54 @@ class BoschClient:
         for i, km in enumerate(ranges):
             mid = named_modes[i]["id"] if i < len(named_modes) else None
             range_per_mode.append({"mode": MODE_NAMES.get(mid, mid), "range_km": km})
+
+        def _sum(field):
+            vals = [b.get(field) for b in bats if b.get(field) is not None]
+            return sum(vals) if vals else None
+
+        # Per-pack detail; packs age independently, so cycles stay per-pack.
+        packs = [{
+            "product": b.get("productName"),
+            "serial": b.get("serialNumber"),
+            "capacity_wh": b.get("totalEnergy"),
+            "level_percent": b.get("batteryLevel"),
+            "charge_cycles": (b.get("numberOfFullChargeCycles") or {}).get("total"),
+            "delivered_lifetime_wh": b.get("deliveredWhOverLifetime"),
+        } for b in bats]
+
         return {
             "bike_id": bike_id,
             "live": soc is not None,
+            # SoC endpoint reports a single system-level charge for the whole bike
+            # (both packs combined); fall back to the first pack's static profile.
             "level_percent": (soc or {}).get("stateOfCharge", bat.get("batteryLevel")),
             "is_charging": (soc or {}).get("chargingActive", bat.get("isCharging")),
             "charger_connected": (soc or {}).get("chargerConnected", bat.get("isChargerConnected")),
-            "total_capacity_wh": bat.get("totalEnergy"),
+            # Combined across packs. For a single-battery bike these equal that pack,
+            # so existing bikes render exactly as before.
+            "total_capacity_wh": _sum("totalEnergy"),
+            "delivered_lifetime_wh": _sum("deliveredWhOverLifetime"),
             "charge_cycles": (bat.get("numberOfFullChargeCycles") or {}).get("total"),
-            "delivered_lifetime_wh": bat.get("deliveredWhOverLifetime"),
+            "battery_count": len(bats),
+            "packs": packs,
             "remaining_energy_for_rider": (soc or {}).get("remainingEnergyForRider"),
             "remaining_charging_time": (soc or {}).get("remainingChargingTime"),
             "range_per_mode": range_per_mode,
             "odometer_km": round((soc or {}).get("odometer", du.get("totalDistanceTraveled") or 0) / 1000, 1),
             "last_update": (soc or {}).get("stateOfChargeLatestUpdate"),
+        }
+
+    async def debug_battery(self, bike_id: str) -> dict:
+        """Raw pack + state-of-charge payloads, for confirming multi-battery shape.
+        Not part of the dashboard — inspect via /api/bikes/<id>/debug/battery."""
+        prof = await self._profile(bike_id)
+        soc = await self._soc(bike_id)
+        if not prof:
+            raise BoschError(404, "bike not found")
+        return {
+            "battery_count": len(prof["data"]["attributes"].get("batteries") or []),
+            "batteries_raw": prof["data"]["attributes"].get("batteries"),
+            "state_of_charge_raw": soc,
         }
 
     async def profile(self, bike_id: str) -> dict:
@@ -173,24 +211,28 @@ class BoschClient:
         a = prof["data"]["attributes"]
         du = a.get("driveUnit") or {}
         cm = a.get("connectedModule") or {}
-        comp_src = {
-            "drive_unit": du,
-            "battery": (a.get("batteries") or [{}])[0],
-            "connect_module": cm,
-            "abs": a.get("antiLockBrakeSystem") or {},
-            "display": a.get("headUnit") or {},
-            "remote": a.get("remoteControl") or {},
-        }
         components = []
-        for key, c in comp_src.items():
+
+        def add(slot, c):
             if c and c.get("productName"):
                 components.append({
-                    "slot": key,
+                    "slot": slot,
                     "product": c.get("productName"),
                     "firmware": c.get("softwareVersion"),
                     "serial": c.get("serialNumber"),
                     "manufactured": c.get("manufacturingDate"),
                 })
+
+        # Preserve the original slot order, but expand the single "battery" entry
+        # into one row per pack so a dual-battery bike lists both.
+        add("drive_unit", du)
+        bats = a.get("batteries") or []
+        for i, b in enumerate(bats):
+            add("battery" if len(bats) == 1 else f"battery {i + 1}", b)
+        add("connect_module", cm)
+        add("abs", a.get("antiLockBrakeSystem") or {})
+        add("display", a.get("headUnit") or {})
+        add("remote", a.get("remoteControl") or {})
         pot = du.get("powerOnTime") or {}
         return {
             "bike_id": bike_id,

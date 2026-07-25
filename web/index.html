@@ -291,8 +291,18 @@ async function loadBattery(){
     : '<span class="pill">unplugged</span>';
   const eta = (d.is_charging && d.remaining_charging_time != null)
     ? ` <span style="color:var(--accent)">~${fmtDur(d.remaining_charging_time)} to full</span>` : '';
+  // One pack → unchanged. Multiple → show combined capacity, then per-pack cycles
+  // (packs age independently, so a single cycle count would be misleading).
+  const n = d.battery_count || 1;
+  const packLine = n > 1
+    ? `<b>${d.total_capacity_wh}</b> Wh · ${n} packs`
+    : `<b>${d.total_capacity_wh}</b> Wh pack · <b>${d.charge_cycles}</b> cycles`;
+  const packDetail = n > 1
+    ? '<br>' + (d.packs||[]).map((p,i)=>
+        `pack ${i+1}: <b>${p.capacity_wh}</b> Wh · <b>${p.charge_cycles}</b> cycles`).join('<br>')
+    : '';
   $('#battMeta').innerHTML = `${charge}${eta}<br>
-    <b>${d.total_capacity_wh}</b> Wh pack · <b>${d.charge_cycles}</b> cycles<br>
+    ${packLine}${packDetail}<br>
     <b>${U.distN(d.odometer_km).toFixed(1)}</b> ${U.du()} odometer<br>
     <b>${d.delivered_lifetime_wh}</b> Wh lifetime`;
   $('#ranges').innerHTML = (d.range_per_mode||[]).map(r=>
