@@ -4,6 +4,7 @@ bosch_users.json
 bosch_webhooks.json
 bosch_poller_state.json
 bosch_events.jsonl
+bosch_prefs.json
 
 # Python
 .venv/

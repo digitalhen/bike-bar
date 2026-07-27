@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bike Bar · Bike Cockpit</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230f1216'/><g fill='none' stroke='%234fd1a5' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'><circle cx='18' cy='43' r='10'/><circle cx='46' cy='43' r='10'/><path d='M18 43 L28 25 L42 25 M28 25 L38 43 M42 25 L38 43'/><path d='M40 25 L45 18'/><path d='M24 24 L31 24'/></g></svg>"/>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <style>
   :root{
@@ -132,6 +133,28 @@
     padding:8px 10px;box-shadow:0 2px 10px rgba(0,0,0,.35);font-size:11px;color:var(--dim)}
   .legend .bar{height:8px;width:150px;border-radius:4px;margin:5px 0}
   .legend .row{display:flex;justify-content:space-between;font-variant-numeric:tabular-nums}
+  /* elevation profile (single-series area chart under the map) */
+  #elevChart{position:relative}
+  #elevChart svg{width:100%;height:auto;display:block}
+  .elev-area{fill:var(--accent);opacity:.14}
+  .elev-line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+  .elev-axis{fill:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
+  .elev-grid{stroke:var(--line);stroke-width:1}
+  .elev-cursor{stroke:var(--accent2);stroke-width:1;opacity:.85}
+  .elev-dot{fill:var(--accent2);stroke:#fff;stroke-width:1.5}
+  .elev-tip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);
+    border-radius:6px;padding:4px 8px;font-size:11px;color:var(--ink);white-space:nowrap;
+    transform:translate(-50%,-124%);box-shadow:0 2px 10px rgba(0,0,0,.45);opacity:0;transition:opacity .08s}
+  .elev-tip b{color:var(--accent)}
+  .elev-empty{display:flex;align-items:center;justify-content:center;height:96px;color:var(--dim);font-size:12px}
+  /* rides pager */
+  .pager{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:12px;color:var(--dim)}
+  .pager button{background:var(--panel2);color:var(--ink);border:1px solid var(--line);
+    border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer}
+  .pager button:hover:not(:disabled){border-color:var(--accent)}
+  .pager button:disabled{opacity:.4;cursor:default}
+  .pager .pinfo{font-variant-numeric:tabular-nums}
+  .pager .spacer{margin-left:auto}
   table{width:100%;border-collapse:collapse;font-size:13px}
   th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
   th{color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
@@ -178,6 +201,10 @@
   </div>
   <div class="col">
     <div id="map"></div>
+    <div class="card" id="elevCard">
+      <h2><span id="profLabel">Speed</span> profile <span class="muted" id="elevMeta"></span></h2>
+      <div id="elevChart"><div class="elev-empty">Select a ride to see its profile</div></div>
+    </div>
     <div class="card">
       <h2>Rides <span class="muted" id="syncNote"></span><span class="muted" id="rideHint">— click a ride to map its track</span></h2>
       <div class="tblwrap">
@@ -186,6 +213,7 @@
           <tbody id="rides"></tbody>
         </table>
       </div>
+      <div class="pager" id="ridePager" hidden></div>
     </div>
   </div>
 </main>
@@ -262,7 +290,7 @@ const U = {
 };
 function fmtDur(min){ min = Math.round(min); return min < 60 ? `${min} min` : `${Math.floor(min/60)}h ${min%60}m`; }
 function renderAll(){ loadBattery(); loadStats(); loadProfile(); loadRides();
-  if(currentTrackData && currentTrackData.has_gps) renderTrack(); }
+  if(currentTrackData && currentTrackData.has_gps){ renderTrack(); renderProfile(); } }
 
 function fmtDate(iso){ if(!iso) return '–'; const d=new Date(iso);
   return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});}
@@ -331,10 +359,30 @@ async function loadProfile(){
     `<div class="comp"><b>${c.product}</b><span>fw ${c.firmware||'–'}</span></div>`).join('');
 }
 
+let ALL_RIDES = [], RIDE_PAGE = 0, SELECTED_RIDE = null;
+const RIDE_PAGE_SIZE = 12;
+
 async function loadRides(){
-  const rides = await api(fp(`/bikes/${BID}/rides?gps=1`));
-  $('#syncNote').textContent = rides.length ? `— synced through ${fmtDate(rides[0].start)} ` : '';
-  $('#rides').innerHTML = rides.map(r=>`
+  ALL_RIDES = await api(fp(`/bikes/${BID}/rides?gps=1`));
+  $('#syncNote').textContent = ALL_RIDES.length ? `— synced through ${fmtDate(ALL_RIDES[0].start)} ` : '';
+  // deep-link: ?ride=<id>&metric=speed_kmh|power_w|cadence auto-opens a ride,
+  // jumping straight to the page that holds it.
+  const params = new URLSearchParams(location.search);
+  const mtr = params.get('metric'); if(mtr) trackMetric = mtr;
+  const rid = params.get('ride');
+  const idx = rid ? ALL_RIDES.findIndex(r=>r.id===rid) : -1;
+  if(idx >= 0) RIDE_PAGE = Math.floor(idx / RIDE_PAGE_SIZE);
+  renderRidePage();
+  if(idx >= 0){ const tr = $(`#rides tr[data-id="${rid}"]`); if(tr) showRide(rid, tr); }
+}
+
+function renderRidePage(){
+  const total = ALL_RIDES.length;
+  const pages = Math.max(1, Math.ceil(total / RIDE_PAGE_SIZE));
+  RIDE_PAGE = Math.min(Math.max(0, RIDE_PAGE), pages - 1);
+  const start = RIDE_PAGE * RIDE_PAGE_SIZE;
+  const rows = ALL_RIDES.slice(start, start + RIDE_PAGE_SIZE);
+  $('#rides').innerHTML = rows.map(r=>`
     <tr data-id="${r.id}">
       <td>${fmtDate(r.start)}</td><td>${U.dist(r.distance_km)}</td>
       <td>${U.speed(r.avg_speed_kmh)}</td><td>${U.speed(r.max_speed_kmh)}</td>
@@ -342,18 +390,25 @@ async function loadRides(){
       <td class="gpschk">${r.has_gps?`<span style="color:var(--accent)" title="${r.gps_points} points">● ${r.gps_points}</span>`:'<span class="muted">–</span>'}</td>
       <td><a class="gpx" href="/api/bikes/${BID}/rides/${r.id}.gpx">GPX</a></td>
     </tr>`).join('');
-  $('#rides').querySelectorAll('tr').forEach(tr=>
-    tr.onclick = e => { if(e.target.tagName!=='A') showRide(tr.dataset.id, tr); });
-  // deep-link: ?ride=<id>&metric=speed_kmh|power_w|cadence auto-opens a ride
-  const params = new URLSearchParams(location.search);
-  const mtr = params.get('metric'); if(mtr) trackMetric = mtr;
-  const rid = params.get('ride');
-  if(rid){ const tr = $(`#rides tr[data-id="${rid}"]`); if(tr) showRide(rid, tr); }
+  $('#rides').querySelectorAll('tr').forEach(tr=>{
+    if(tr.dataset.id === SELECTED_RIDE) tr.classList.add('sel');
+    tr.onclick = e => { if(e.target.tagName!=='A') showRide(tr.dataset.id, tr); };
+  });
+  const pager = $('#ridePager');
+  if(total <= RIDE_PAGE_SIZE){ pager.hidden = true; return; }
+  pager.hidden = false;
+  pager.innerHTML = `
+    <button id="pgPrev" ${RIDE_PAGE===0?'disabled':''}>‹ Newer</button>
+    <button id="pgNext" ${RIDE_PAGE>=pages-1?'disabled':''}>Older ›</button>
+    <span class="pinfo">Page ${RIDE_PAGE+1} of ${pages}</span>
+    <span class="pinfo spacer">${start+1}–${Math.min(start+RIDE_PAGE_SIZE, total)} of ${total} rides</span>`;
+  $('#pgPrev').onclick = ()=>{ RIDE_PAGE--; renderRidePage(); };
+  $('#pgNext').onclick = ()=>{ RIDE_PAGE++; renderRidePage(); };
 }
 
 async function showRide(aid, tr){
   $('#rides').querySelectorAll('tr').forEach(t=>t.classList.remove('sel'));
-  tr.classList.add('sel');
+  tr.classList.add('sel'); SELECTED_RIDE = aid;
   $('#rideHint').textContent = '— loading track…';
   const d = await api(`/bikes/${BID}/rides/${aid}`);
   currentTrackData = d;
@@ -361,10 +416,13 @@ async function showRide(aid, tr){
     if(trackLayer){ map.removeLayer(trackLayer); trackLayer=null; }
     if(toggleEl)toggleEl.style.display='none';
     if(legendEl)legendEl.style.display='none';
+    clearHoverLink(); blankElevation('This ride was recorded without GPS.');
     $('#rideHint').textContent = '— this ride has no GPS (recorded without phone)';
     return;
   }
-  renderTrack();
+  buildLink(d);     // shared track + cumulative-distance model for map↔chart linking
+  renderTrack();    // colored track on the map (+ map hover → chart)
+  renderProfile();  // metric profile under the map (+ chart hover → map)
 }
 
 async function loadLocation(){
@@ -398,7 +456,7 @@ function initControls(){
     const d = L.DomUtil.create('div','metric-toggle'); toggleEl = d;
     d.innerHTML = METRICS.map(m=>`<button data-k="${m.key}">${m.label}</button>`).join('');
     L.DomEvent.disableClickPropagation(d);
-    d.addEventListener('click', e => { const k = e.target.dataset.k; if(k){ trackMetric = k; renderTrack(); }});
+    d.addEventListener('click', e => { const k = e.target.dataset.k; if(k){ trackMetric = k; renderTrack(); renderProfile(); }});
     d.style.display = 'none'; return d;
   };
   tc.addTo(map);
@@ -425,6 +483,7 @@ function renderTrack(){
   L.circleMarker([track[0].lat,track[0].lon], {radius:5, color:'#fff', weight:2, fillColor:'#5b9dff', fillOpacity:1}).addTo(g);
   g.addTo(map); trackLayer = g;
   map.fitBounds(L.latLngBounds(track.map(p=>[p.lat,p.lon])), {padding:[30,30]});
+  attachMapHover();  // moving over the map highlights the matching spot on the elevation chart
   const m = METRICS.find(x=>x.key===key);
   // per-metric unit conversion for the legend (speed & elevation depend on unit system)
   const conv = key==='speed_kmh' ? U.spN : key==='elevation_m' ? U.elN : (x=>x);
@@ -441,11 +500,168 @@ function renderTrack(){
   bits.push(`colored by ${m.label.toLowerCase()}`);
   $('#rideHint').textContent = '— ' + bits.join(' · ');
 }
+// ---- ride profile chart + linked map/chart hover ----
+// LINK is the shared model both views hover through: one track array and its
+// cumulative distance, so a point's index means the same thing on the map and
+// on the chart. The chart plots whichever metric the map toggle selects
+// (trackMetric), keeping the two views on the same measure.
+let LINK = null;
+
+function haversineKm(a, b){
+  const R = 6371, rad = Math.PI/180;
+  const dLat = (b.lat-a.lat)*rad, dLon = (b.lon-a.lon)*rad;
+  const la1 = a.lat*rad, la2 = b.lat*rad;
+  const h = Math.sin(dLat/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+
+function buildLink(d){
+  const track = d.track || [];
+  const dist = [0];
+  for(let i=1;i<track.length;i++) dist.push(dist[i-1] + haversineKm(track[i-1], track[i]));
+  LINK = {track, dist, prof:null, pin:null};
+}
+
+// Per-metric display helpers (speed & elevation follow the unit system).
+function metricInfo(key){
+  const m = METRICS.find(x=>x.key===key) || METRICS[0];
+  const conv = key==='speed_kmh' ? U.spN : key==='elevation_m' ? U.elN : (x=>x);
+  const unit = key==='speed_kmh' ? U.spu() : key==='elevation_m' ? U.elu() : m.unit;
+  const dp = key==='speed_kmh' ? 1 : 0;
+  return {m, conv, unit, dp, num: v => v==null ? '–' : conv(v).toFixed(dp)};
+}
+
+// The card stays on screen at all times; with no (or an unusable) ride selected
+// it shows a muted placeholder instead of hiding.
+function blankElevation(msg){
+  const {m} = metricInfo(trackMetric);
+  $('#profLabel').textContent = m.label;
+  $('#elevChart').innerHTML = `<div class="elev-empty">${msg || 'Select a ride to see its '+m.label.toLowerCase()+' profile'}</div>`;
+  $('#elevMeta').textContent = '';
+  if(LINK){ LINK.prof = null; if(LINK.pin){ map.removeLayer(LINK.pin); LINK.pin=null; } }
+}
+
+// Plot trackMetric over distance for the selected ride.
+function renderProfile(){
+  const key = trackMetric;
+  const {m, conv, unit, dp, num} = metricInfo(key);
+  $('#profLabel').textContent = m.label;
+  if(!LINK){ blankElevation(); return; }
+  const {track, dist} = LINK;
+  // filled series for the chosen metric (carry across nulls, forward then back,
+  // so every index has a value and stays aligned with the map track 1:1)
+  const vals = track.map(p=>p[key]);
+  let last = null;
+  for(let i=0;i<vals.length;i++){ if(vals[i]==null) vals[i]=last; else last=vals[i]; }
+  last = null;
+  for(let i=vals.length-1;i>=0;i--){ if(vals[i]==null) vals[i]=last; else last=vals[i]; }
+  if(track.length < 2 || !vals.some(v=>v!=null)){ blankElevation(`This ride has no ${m.label.toLowerCase()} data.`); return; }
+  const totalKm = dist[dist.length-1] || 0;
+  const vv = vals.filter(v=>v!=null);
+  const lo = Math.min(...vv), hi = Math.max(...vv), span = (hi-lo) || 1;
+  const W=680, H=114, padL=46, padR=12, padT=10, padB=18, iw=W-padL-padR, ih=H-padT-padB;
+  const xOf = km => padL + (totalKm ? km/totalKm : 0)*iw;
+  const yOf = v  => padT + (1 - (v-lo)/span)*ih;
+  const pts = track.map((p,i)=>[xOf(dist[i]), yOf(vals[i]!=null?vals[i]:lo)]);
+  const line = pts.map((q,i)=>(i?'L':'M')+q[0].toFixed(1)+' '+q[1].toFixed(1)).join(' ');
+  const area = `M${padL} ${(padT+ih).toFixed(1)} ` +
+    pts.map(q=>'L'+q[0].toFixed(1)+' '+q[1].toFixed(1)).join(' ') +
+    ` L${(padL+iw).toFixed(1)} ${(padT+ih).toFixed(1)} Z`;
+  const yt = [lo, (lo+hi)/2, hi].map(v=>({y:yOf(v), label:num(v)}));
+  const xt = [0, totalKm/2, totalKm].map(km=>({x:xOf(km), label:U.distN(km).toFixed(totalKm>=10?0:1)}));
+  $('#elevChart').innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${m.label} over distance for the selected ride">
+      ${yt.map(t=>`<line class="elev-grid" x1="${padL}" y1="${t.y.toFixed(1)}" x2="${(padL+iw).toFixed(1)}" y2="${t.y.toFixed(1)}"/>`+
+        `<text class="elev-axis" x="${padL-6}" y="${(t.y+3).toFixed(1)}" text-anchor="end">${t.label}</text>`).join('')}
+      <path class="elev-area" d="${area}"/>
+      <path class="elev-line" d="${line}"/>
+      ${xt.map(t=>`<text class="elev-axis" x="${t.x.toFixed(1)}" y="${H-5}" text-anchor="middle">${t.label} ${U.du()}</text>`).join('')}
+      <line class="elev-cursor" x1="0" y1="${padT}" x2="0" y2="${(padT+ih).toFixed(1)}" style="display:none"/>
+      <circle class="elev-dot" r="3.5" cx="0" cy="0" style="display:none"/>
+    </svg>
+    <div class="elev-tip"></div>`;
+  const svgEl = $('#elevChart svg');
+  LINK.prof = {svgEl, W, H, xOf, yOf, vals, fmt: v => v==null ? '–' : `${num(v)} ${unit}`,
+    cursor: svgEl.querySelector('.elev-cursor'),
+    dot: svgEl.querySelector('.elev-dot'),
+    tip: $('#elevChart .elev-tip')};
+  svgEl.addEventListener('mousemove', ev => {
+    const rect = svgEl.getBoundingClientRect();
+    const vbx = (ev.clientX-rect.left)/rect.width*W;
+    let bi=0, bd=Infinity;
+    for(let i=0;i<pts.length;i++){ const dd=Math.abs(pts[i][0]-vbx); if(dd<bd){ bd=dd; bi=i; } }
+    setHover(bi);
+  });
+  svgEl.addEventListener('mouseleave', () => setHover(null));
+  // header meta: elevation keeps ↑gain ↓loss, other metrics show the average
+  const d = currentTrackData;
+  const avgField = {speed_kmh:'avg_speed_kmh', power_w:'avg_power_w', cadence:'avg_cadence'}[key];
+  const range = `${num(lo)}–${num(hi)} ${unit}`;
+  if(key==='elevation_m' && d && d.elevation_gain_m!=null)
+    $('#elevMeta').textContent = `↑${U.elev(d.elevation_gain_m)} ↓${U.elev(d.elevation_loss_m)} · ${range}`;
+  else if(avgField && d && d[avgField]!=null)
+    $('#elevMeta').textContent = `avg ${num(d[avgField])} · ${range}`;
+  else
+    $('#elevMeta').textContent = range;
+}
+
+// Drive both views from one track index: the map pin and the chart cursor/tooltip.
+function setHover(i){
+  if(!LINK) return;
+  if(i==null){
+    if(LINK.pin){ map.removeLayer(LINK.pin); LINK.pin=null; }
+    if(LINK.prof){ LINK.prof.cursor.style.display='none'; LINK.prof.dot.style.display='none'; LINK.prof.tip.style.opacity=0; }
+    return;
+  }
+  const p = LINK.track[i];
+  if(p){
+    if(!LINK.pin) LINK.pin = L.circleMarker([p.lat,p.lon],
+      {radius:6, color:'#fff', weight:2, fillColor:'#5b9dff', fillOpacity:1, interactive:false}).addTo(map);
+    else LINK.pin.setLatLng([p.lat,p.lon]);
+  }
+  const E = LINK.prof;
+  if(E){
+    const v = E.vals[i];
+    const px = E.xOf(LINK.dist[i]), py = E.yOf(v!=null?v:0);
+    E.cursor.style.display=''; E.cursor.setAttribute('x1',px); E.cursor.setAttribute('x2',px);
+    E.dot.style.display=''; E.dot.setAttribute('cx',px); E.dot.setAttribute('cy',py);
+    const rect = E.svgEl.getBoundingClientRect();
+    E.tip.style.left = (px/E.W*rect.width)+'px';
+    E.tip.style.top  = (py/E.H*rect.height)+'px';
+    E.tip.style.opacity = 1;
+    E.tip.innerHTML = `<b>${E.fmt(v)}</b> · ${U.dist(LINK.dist[i], LINK.dist[i]>=10?1:2)}`;
+  }
+}
+
+function onMapMove(e){
+  const t = LINK && LINK.track;
+  if(!t || t.length < 2) return;
+  const {lat, lng} = e.latlng, cosl = Math.cos(lat*Math.PI/180);
+  let bi=0, bd=Infinity;
+  for(let i=0;i<t.length;i++){
+    const dy = t[i].lat-lat, dx = (t[i].lon-lng)*cosl;
+    const dd = dx*dx + dy*dy;
+    if(dd<bd){ bd=dd; bi=i; }
+  }
+  setHover(bi);
+}
+function onMapOut(){ setHover(null); }
+function attachMapHover(){
+  if(!map) return;
+  map.off('mousemove', onMapMove).off('mouseout', onMapOut);
+  map.on('mousemove', onMapMove).on('mouseout', onMapOut);
+}
+function clearHoverLink(){
+  setHover(null);
+  if(map) map.off('mousemove', onMapMove).off('mouseout', onMapOut);
+}
+
 function initMap(){
   map = L.map('map',{zoomControl:true}).setView([40.61,-73.98],12);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
     {maxZoom:19, attribution:'© OpenStreetMap'}).addTo(map);
   initControls();
+  blankElevation();  // sync the profile-card header with the default metric on load
 }
 
 async function refreshAll(){

@@ -111,9 +111,23 @@ class BoschClient:
         return await self._get(config.HOST_PROFILE, f"/v1/state-of-charge/{bike_id}", config.TTL_LIVE)
 
     async def _activities(self, bike_id: str | None):
-        params = {"bikeId": bike_id} if bike_id else None
-        d = await self._get(config.HOST_ACTIVITY, "/v1/activity", config.TTL_RIDES, params)
-        return (d or {}).get("data", [])
+        # Bosch paginates the activity list (default page size 20, oldest-first),
+        # so once the ride count crosses a page boundary the *newest* rides spill
+        # onto a later page. Fetching only page 0 silently dropped them. Request a
+        # large page size and follow `meta.pages` so every ride is collected.
+        base = {"bikeId": bike_id} if bike_id else {}
+        out: list[dict] = []
+        page = 0
+        while page < 100:  # hard safety cap; real accounts have far fewer pages
+            params = {**base, "page": page, "size": 100}
+            d = await self._get(config.HOST_ACTIVITY, "/v1/activity", config.TTL_RIDES, params)
+            batch = (d or {}).get("data", []) or []
+            out.extend(batch)
+            pages = ((d or {}).get("meta") or {}).get("pages")
+            page += 1
+            if not batch or pages is None or page >= pages:
+                break
+        return out
 
     async def _activity_detail(self, aid: str):
         d = await self._get(config.HOST_ACTIVITY, f"/v1/activity/{aid}/detail", config.TTL_RIDE)
