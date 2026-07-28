@@ -466,6 +466,7 @@ struct DetailView: View {
     @ObservedObject var store: BikeStore
     @ObservedObject private var updater = UpdaterController.shared
     @State private var launchAtLogin = LoginItem.isEnabled
+    @State private var shareMetrics = Analytics.isEnabled
 
     private var useImperial: Bool { store.useImperial }
     private func dist(_ km: Double) -> String {
@@ -581,6 +582,11 @@ struct DetailView: View {
                     .font(.caption).disabled(!updater.canCheck)
             }
 
+            Toggle("Share anonymous usage stats", isOn: $shareMetrics)
+                .toggleStyle(.checkbox).font(.caption)
+                .onChange(of: shareMetrics) { on in Analytics.setEnabled(on) }
+                .help("Sends an anonymous \"app is running\" ping (app version + macOS version only). No account, bike, or location data is ever sent.")
+
             Divider()
             HStack {
                 Button("Dashboard") { NSWorkspace.shared.open(URL(string: apiBase)!) }
@@ -687,6 +693,101 @@ final class StatusBarController: NSObject {
     }
 }
 
+// MARK: - Analytics (anonymous usage — Aptabase)
+// One privacy-preserving signal so we can see how many installs are active. No
+// account, bike, location, or personal data is ever sent — only the app version,
+// macOS version, and a rotating session id. Aptabase itself stores no IP address
+// or device identifier (https://aptabase.com/privacy). Users can turn this off in
+// Settings → "Share anonymous usage stats".
+enum Analytics {
+    // Public ingest key (safe to embed — every Aptabase-instrumented app ships one).
+    private static let appKey = "A-US-7742302879"
+    private static let defaultsKey = "metricsEnabled"
+
+    private static var sessionId = UUID().uuidString
+    private static var lastTouch = Date.distantPast
+    private static var heartbeat: Timer?
+
+    /// Opt-out defaults to ON: a missing key means enabled.
+    static var isEnabled: Bool {
+        UserDefaults.standard.object(forKey: defaultsKey) == nil
+            ? true : UserDefaults.standard.bool(forKey: defaultsKey)
+    }
+
+    // Region is the middle segment of the key (A-US-…, A-EU-…, A-DEV-…).
+    private static var ingestURL: URL? {
+        let parts = appKey.split(separator: "-")
+        guard parts.count >= 2 else { return nil }
+        let host: String
+        switch parts[1] {
+        case "US":  host = "https://us.aptabase.com"
+        case "EU":  host = "https://eu.aptabase.com"
+        case "DEV": host = "http://localhost:3000"
+        default:    return nil
+        }
+        return URL(string: "\(host)/api/v0/event")
+    }
+
+    /// Send `app_started` now, then a heartbeat twice a day so a machine left
+    /// running still counts as active each day it is on.
+    static func start() {
+        guard isEnabled else { return }
+        track("app_started")
+        heartbeat?.invalidate()
+        heartbeat = Timer.scheduledTimer(withTimeInterval: 12 * 3600, repeats: true) { _ in
+            track("heartbeat")
+        }
+    }
+
+    static func setEnabled(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: defaultsKey)
+        if on { start() } else { heartbeat?.invalidate(); heartbeat = nil }
+    }
+
+    static func track(_ event: String) {
+        guard isEnabled, let url = ingestURL else { return }
+        // Aptabase groups events into sessions; roll a new id after an hour idle.
+        if Date().timeIntervalSince(lastTouch) > 3600 { sessionId = UUID().uuidString }
+        lastTouch = Date()
+
+        let info = Bundle.main.infoDictionary
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        #if DEBUG
+        let isDebug = true
+        #else
+        let isDebug = false
+        #endif
+        let body: [String: Any] = [
+            "timestamp": iso8601.string(from: Date()),
+            "sessionId": sessionId,
+            "eventName": event,
+            "systemProps": [
+                "isDebug": isDebug,
+                "osName": "macOS",
+                "osVersion": "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
+                "locale": Locale.current.identifier.replacingOccurrences(of: "_", with: "-"),
+                "appVersion": info?["CFBundleShortVersionString"] as? String ?? "?",
+                "appBuildNumber": info?["CFBundleVersion"] as? String ?? "?",
+                "sdkVersion": "bikebar-swift@1.0",
+            ],
+        ]
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 10
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(appKey, forHTTPHeaderField: "App-Key")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        URLSession.shared.dataTask(with: req).resume()   // fire-and-forget; ignore failures
+    }
+
+    private static let iso8601: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f
+    }()
+}
+
 // MARK: - App
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: StatusBarController?
@@ -697,6 +798,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = UpdaterController.shared             // start Sparkle (background update checks)
         claimURLScheme()                         // own onebikeapp-ios:// so login redirects land here
         backend.start()                          // no-op in dev; spawns the bundled server otherwise
+        Analytics.start()                        // anonymous "app is running" ping (opt-out in Settings)
         Task { [weak self] in
             await self?.backend.waitUntilHealthy()
             await self?.controller?.store.refresh()

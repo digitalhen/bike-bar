@@ -244,7 +244,18 @@ click **Allow** (this is what makes banners work).
 - **Check for Updates…** — the app auto-updates itself via **Sparkle**: it checks
   for a new version in the background and can install it with one click. No App
   Store needed.
+- **Share anonymous usage stats** — on by default; untick to opt out (see Privacy).
 - New events (battery full, ride logged, …) fire native banners.
+
+### Privacy — anonymous usage stats
+
+So we can see how many installs are actually active, the app sends an anonymous
+**"app is running"** ping on launch (and a heartbeat twice a day) to
+[Aptabase](https://aptabase.com), a privacy-first analytics service that stores
+**no IP address and no device identifier**. The ping carries only the **app
+version**, **macOS version**, **locale**, and a **rotating session id** — never
+your account, bike, location, rides, or tokens. Turn it off any time with
+**Settings → Share anonymous usage stats**; nothing is sent while it's off.
 
 > Building the app requires **PyInstaller** (`requirements-build.txt`) in the venv
 > and `swiftc` (Xcode command-line tools). The *runtime* still needs nothing but
