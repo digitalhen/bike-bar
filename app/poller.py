@@ -9,7 +9,7 @@ from pathlib import Path
 
 import httpx
 
-from . import config, events, notify, schedules, webhooks
+from . import config, events, notify, prefs, schedules, webhooks
 from .bosch import BoschClient, BoschError
 from .store import TokenStore
 
@@ -76,10 +76,26 @@ async def poll_user(store: TokenStore, http: httpx.AsyncClient, user_id: str,
         key = f"{user_id}:{bike_id}"
         cur = await _snapshot(client, bike_id)
         prev = state.get(key)
+
+        # Target is level-triggered and latched, so it survives a restart taken
+        # mid-charge - the one check worth running even on a first sighting,
+        # because the cost of missing it is charging the pack to 100%.
+        target = prefs.charge_target()
+        at_target = events.at_target(cur, target)
+        cur["target_fired"] = at_target
         state[key] = cur
-        if prev is None:
+        detected = []
+        if at_target and not (prev or {}).get("target_fired"):
+            detected.append({"event": "battery.target",
+                             "data": {"level": cur.get("level"), "target": target,
+                                      "charging": bool(cur.get("charging")),
+                                      "baseline": prev is None}})
+        if prev is not None:
+            detected += events.detect(prev, cur)
+        elif not detected:
             continue  # first sighting: set a baseline, don't fire
-        for ev in events.detect(prev, cur):
+
+        for ev in detected:
             rec = {
                 "event": ev["event"],
                 "bike_id": bike_id,

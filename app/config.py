@@ -49,9 +49,13 @@ def data_path(filename: str) -> _Path:
 POLL_INTERVAL = 300     # seconds between poll cycles
 BATTERY_LOW_PCT = 20    # threshold for the battery.low event
 BATTERY_FULL_PCT = 100  # level considered "full"
-# Partial-charge target. Crossing this upward fires battery.target, which is the
-# hook for "stop at 80%" style automations that spare the pack a full top-off.
+# Default charge ceiling. Reaching it fires battery.target, the hook for
+# "stop at 80%" automations that spare the pack a full top-off. The live value
+# is a user pref (see app/prefs.py) so it can be changed per charge; this is
+# only the fallback when nothing has been chosen.
 BATTERY_TARGET_PCT = 80
+CHARGE_TARGET_MIN = 50   # a ceiling below this is more likely a typo than intent
+CHARGE_TARGET_MAX = 100
 EVENTS_LOG_MAX = 500    # recent events kept for GET /api/events
 WEBHOOK_TIMEOUT = 10
 WEBHOOK_RETRIES = 3

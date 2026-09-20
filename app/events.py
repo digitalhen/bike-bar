@@ -22,6 +22,21 @@ def build_snapshot(battery: dict, profile: dict, rides: list[dict]) -> dict:
     }
 
 
+def at_target(cur: dict, target: int) -> bool:
+    """True when the pack is at/above target with power still applied.
+
+    Deliberately a level test, not an edge: a charge already in progress past
+    the target (or a restart that takes its baseline at 85%) must still be
+    stoppable. The caller latches it so it fires once per charge, not per poll.
+    Either flag counts - some bikes report charger_connected while is_charging
+    has already gone false on a trickle.
+    """
+    level = cur.get("level")
+    if not isinstance(level, (int, float)) or level < target:
+        return False
+    return bool(cur.get("charging") or cur.get("plugged"))
+
+
 def _rose(prev, cur) -> bool:
     return prev is False and cur is True
 
@@ -52,9 +67,6 @@ def detect(prev: dict, cur: dict) -> list[dict]:
     if isinstance(pl, (int, float)) and isinstance(cl, (int, float)):
         if cl >= config.BATTERY_FULL_PCT > pl:
             emit("battery.full", {"level": cl})
-        target = config.BATTERY_TARGET_PCT
-        if cl >= target > pl:
-            emit("battery.target", {"level": cl, "target": target})
         low = config.BATTERY_LOW_PCT
         if pl > low >= cl:
             emit("battery.low", {"level": cl, "threshold": low})

@@ -175,6 +175,7 @@ final class BikeStore: ObservableObject {
     @Published var subscribedTriggers: Set<String> = []
     @Published var chargeSchedules: [ChargeSchedule] = []
     @Published var triggerStatus: String?
+    @Published var chargeTarget = 80   // ceiling for the current charge, from /api/prefs
     var canStart: Bool { subscribedTriggers.contains("charge.requested") }
     var canStop: Bool { subscribedTriggers.contains("charge.stopped") }
     var chargeTriggerAvailable: Bool { canStart || canStop }
@@ -248,16 +249,19 @@ final class BikeStore: ObservableObject {
         }
     }
 
-    func trigger(_ event: String) async {
-        let r = await post("/api/trigger",
-                           ["event": event, "data": ["source": "menubar"]])
+    func trigger(_ event: String, target: Int? = nil) async {
+        var body: [String: Any] = ["event": event, "data": ["source": "menubar"]]
+        if let target { body["target"] = target }
+        let r = await post("/api/trigger", body)
         guard let (code, data) = r, code == 200,
               let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             triggerStatus = "Couldn't reach the backend"; return
         }
         let n = (j["delivered"] as? Int) ?? 0
         let ok = (j["ok"] as? Bool) ?? false
-        let verb = event == "charge.stopped" ? "Stop requested" : "Charging requested"
+        if let t = j["target"] as? Int { chargeTarget = t }
+        let verb = event == "charge.stopped" ? "Stop requested"
+            : "Charging to \(target ?? chargeTarget)%"
         triggerStatus = n == 0 ? "No webhook is listening"
             : (ok ? verb : "Sent, but \(n == 1 ? "the" : "a") webhook failed")
         Task { try? await Task.sleep(nanoseconds: 4_000_000_000); triggerStatus = nil }
@@ -286,6 +290,7 @@ final class BikeStore: ObservableObject {
         guard let d = await get("/api/prefs"),
               let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               let units = j["units"] as? String else { return }
+        if let t = j["charge_target"] as? Int { chargeTarget = t }
         applyImperial(units == "imperial")
     }
 
@@ -674,14 +679,24 @@ struct DetailView: View {
                 // Labels stay terse: the panel is a fixed 300pt and "Begin charging"
                 // plus "Stop charging" plus "Schedule…" overflows it. The row label
                 // carries the meaning instead.
-                HStack {
-                    Text("Charging").foregroundColor(.secondary)
-                    Spacer()
-                    if store.canStart {
-                        Button("Start") {
-                            Task { await store.trigger("charge.requested") }
+                // Two rows: four controls plus a label will not fit the 300pt panel.
+                if store.canStart {
+                    HStack {
+                        Text("Charge to").foregroundColor(.secondary)
+                        Spacer()
+                        Button("80%") {
+                            Task { await store.trigger("charge.requested", target: 80) }
                         }
-                    }
+                        Button("100%") {
+                            Task { await store.trigger("charge.requested", target: 100) }
+                        }
+                    }.font(.caption)
+                }
+                HStack {
+                    Text(store.chargeTarget == 100 ? "Full charge"
+                                                   : "Stops near \(store.chargeTarget)%")
+                        .foregroundColor(.secondary)
+                    Spacer()
                     if store.canStop {
                         Button("Stop") {
                             Task { await store.trigger("charge.stopped") }

@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse, Response, FileResponse
 from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 
-from . import auth, config, poller, schedules, tracks, webhooks
+from . import auth, config, poller, prefs, schedules, tracks, webhooks
 from .bosch import BoschClient, BoschError
 from .store import TokenStore
 
@@ -229,7 +229,18 @@ async def trigger(request):
             status_code=400)
     data = body.get("data") or {}
     data.setdefault("source", body.get("source") or "api")
+    # A start may name the ceiling for this charge ("to 80" vs "to 100"), which
+    # sticks until changed - the poller reads it when deciding to cut power.
+    if body.get("target") is not None:
+        target = prefs.clean_target(body["target"])
+        if target is None:
+            return JSONResponse(
+                {"error": f"target must be {config.CHARGE_TARGET_MIN}-"
+                          f"{config.CHARGE_TARGET_MAX}"}, status_code=400)
+        prefs.write(charge_target=target)
+        data["target"] = target
     result = await poller.emit(request.app.state.http, event, data)
+    result["target"] = prefs.charge_target()
     return JSONResponse(result)
 
 
@@ -268,36 +279,27 @@ async def poll_now(request):
 # --- shared UI preferences (units) ------------------------------------------
 # One small JSON file both the dashboard and the menu bar app read/write, so a
 # km/mi switch in either place is reflected in the other.
-import json as _json
-
-_VALID_UNITS = {"metric", "imperial"}
-
-
-def _read_prefs() -> dict:
-    p = config.data_path(config.PREFS_FILE)
-    if p.exists():
-        try:
-            data = _json.loads(p.read_text())
-        except (ValueError, OSError):
-            data = {}
-    else:
-        data = {}
-    units = data.get("units")
-    return {"units": units if units in _VALID_UNITS else "metric"}
-
-
 async def prefs_get(request):
-    return JSONResponse(_read_prefs())
+    return JSONResponse(prefs.read())
 
 
 async def prefs_put(request):
+    """Partial update: send units, charge_target, or both."""
     body = await request.json()
     units = body.get("units")
-    if units not in _VALID_UNITS:
-        return JSONResponse({"error": "units must be 'metric' or 'imperial'"}, status_code=400)
-    prefs = {"units": units}
-    config.data_path(config.PREFS_FILE).write_text(_json.dumps(prefs, indent=2))
-    return JSONResponse(prefs)
+    if units is not None and units not in prefs.VALID_UNITS:
+        return JSONResponse({"error": "units must be 'metric' or 'imperial'"},
+                            status_code=400)
+    target = None
+    if body.get("charge_target") is not None:
+        target = prefs.clean_target(body["charge_target"])
+        if target is None:
+            return JSONResponse(
+                {"error": f"charge_target must be {config.CHARGE_TARGET_MIN}-"
+                          f"{config.CHARGE_TARGET_MAX}"}, status_code=400)
+    if units is None and target is None:
+        return JSONResponse({"error": "nothing to update"}, status_code=400)
+    return JSONResponse(prefs.write(units=units, charge_target=target))
 
 
 async def index(request):
