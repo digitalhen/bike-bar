@@ -309,14 +309,25 @@ async function boot(){
   }catch(e){ $('#bikeName').innerHTML = '<span class="err">'+(e.error||'failed to load — is a bike logged in?')+'</span>'; }
 }
 
+// Keep this mapping aligned with chargingStatus in BoschBar.swift.
+function chargingStatus(connected, charging, level){
+  if (connected === false && charging === true) return 'Charging status unclear';
+  if (charging === true) return 'Charging';
+  if (connected === true && charging === false)
+    return level === 100 ? 'Plugged in · Fully charged' : 'Plugged in · Not charging';
+  if (connected === true) return 'Plugged in · Charging status unknown';
+  if (connected === false) return 'Unplugged';
+  if (charging === false) return 'Not charging · Connection unknown';
+  return 'Charging status unknown';
+}
+
 async function loadBattery(){
   const d = await api(fp(`/bikes/${BID}/battery`));
   $('#soc').textContent = (d.level_percent??'–')+'%';
   $('#ring').style.setProperty('--p', d.level_percent??0);
   $('#live').innerHTML = `<span class="dot ${d.live?'':'off'}"></span>${d.live?'live':'last-known'} · updated ${ago(d.last_update)||'?'}`;
-  const charge = d.is_charging ? '<span class="pill on">charging</span>'
-    : d.charger_connected ? '<span class="pill on">plugged in</span>'
-    : '<span class="pill">unplugged</span>';
+  const chargingLabel = chargingStatus(d.charger_connected, d.is_charging, d.level_percent);
+  const charge = `<span class="pill${chargingLabel === 'Charging' ? ' on' : ''}">${chargingLabel}</span>`;
   const eta = (d.is_charging && d.remaining_charging_time != null)
     ? ` <span style="color:var(--accent)">~${fmtDur(d.remaining_charging_time)} to full</span>` : '';
   // One pack → unchanged. Multiple → show combined capacity, then per-pack cycles

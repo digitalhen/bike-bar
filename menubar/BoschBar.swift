@@ -124,6 +124,20 @@ enum LoginItem {
 }
 
 // MARK: - Models
+// Missing flags are unknown, not false. A full pack does not prove why charging stopped.
+func chargingStatus(connected: Bool?, charging: Bool?, level: Int?) -> String {
+    switch (connected, charging) {
+    case (false?, true?): return "Charging status unclear"
+    case (_, true?): return "Charging"
+    case (true?, false?):
+        return level == 100 ? "Plugged in · Fully charged" : "Plugged in · Not charging"
+    case (true?, nil): return "Plugged in · Charging status unknown"
+    case (false?, _): return "Unplugged"
+    case (nil, false?): return "Not charging · Connection unknown"
+    case (nil, nil): return "Charging status unknown"
+    }
+}
+
 struct Bike: Decodable { let id: String; let brand: String?; let drive_unit: String? }
 struct ChargeSchedule: Decodable, Identifiable {
     let id: String; let event: String; let at: String; let repeat_: String
@@ -588,6 +602,7 @@ struct DetailView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(b.level_percent ?? 0)%").font(.title2).bold()
                         Text(statusLine(b)).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         if (b.is_charging ?? false), let eta = store.chargeEta {
                             let tilde = store.chargeEtaEstimated ? "~" : ""
                             let note = store.chargeEtaEstimated ? " (est.)" : ""
@@ -764,10 +779,8 @@ struct DetailView: View {
     }
 
     private func statusLine(_ b: Battery) -> String {
-        if b.is_charging ?? false { return "charging" }
-        if b.charger_connected ?? false { return "plugged in" }
-        let live = (b.live ?? false) ? "live" : "last-known"
-        return "unplugged · \(live)"
+        chargingStatus(connected: b.charger_connected, charging: b.is_charging,
+                       level: b.level_percent)
     }
     private func shortDate(_ iso: String?) -> String {
         guard let iso, let d = ISO8601DateFormatter().date(from: iso) else { return "—" }
