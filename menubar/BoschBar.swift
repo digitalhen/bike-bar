@@ -671,21 +671,25 @@ struct DetailView: View {
                     .onAppear {
                         if !store.canStart { scheduleEvent = "charge.stopped" }
                     }
+                // Labels stay terse: the panel is a fixed 300pt and "Begin charging"
+                // plus "Stop charging" plus "Schedule…" overflows it. The row label
+                // carries the meaning instead.
                 HStack {
+                    Text("Charging").foregroundColor(.secondary)
+                    Spacer()
                     if store.canStart {
-                        Button("Begin charging") {
+                        Button("Start") {
                             Task { await store.trigger("charge.requested") }
                         }
                     }
                     if store.canStop {
-                        Button("Stop charging") {
+                        Button("Stop") {
                             Task { await store.trigger("charge.stopped") }
                         }
                     }
                     Button(showSchedule ? "Cancel" : "Schedule…") {
                         withAnimation { showSchedule.toggle() }
                     }
-                    Spacer()
                 }.font(.caption)
 
                 if showSchedule {
@@ -695,12 +699,14 @@ struct DetailView: View {
                             if store.canStop { Text("Stop").tag("charge.stopped") }
                         }
                         .pickerStyle(.segmented).labelsHidden()
-                        HStack {
+                        HStack(spacing: 6) {
                             DatePicker("", selection: $scheduleTime,
                                        displayedComponents: .hourAndMinute)
                                 .labelsHidden().datePickerStyle(.field)
+                                .fixedSize()
                             Toggle("Daily", isOn: $scheduleDaily)
                                 .toggleStyle(.checkbox)
+                            Spacer(minLength: 0)
                             Button("Set") {
                                 Task {
                                     await store.scheduleCharging(event: scheduleEvent,
