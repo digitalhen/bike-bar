@@ -83,9 +83,16 @@ async def poll_user(store: TokenStore, http: httpx.AsyncClient, user_id: str,
         target = prefs.charge_target()
         at_target = events.at_target(cur, target)
         cur["target_fired"] = at_target
+        cur["target_fired_at"] = target if at_target else None
         state[key] = cur
+        # The latch is only valid for the ceiling it was armed at. Changing the
+        # ceiling therefore re-arms it: without this, raising 80 -> 100 left a
+        # stale latch that suppressed the next cut entirely, and lowering it
+        # again would not take effect until the bike was unplugged.
+        latched = (bool((prev or {}).get("target_fired"))
+                   and (prev or {}).get("target_fired_at") == target)
         detected = []
-        if at_target and not (prev or {}).get("target_fired"):
+        if at_target and not latched:
             detected.append({"event": "battery.target",
                              "data": {"level": cur.get("level"), "target": target,
                                       "charging": bool(cur.get("charging")),
