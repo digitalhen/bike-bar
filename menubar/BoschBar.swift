@@ -172,9 +172,12 @@ final class BikeStore: ObservableObject {
     // Charge triggers. The app can't switch mains itself — it raises an event and
     // whatever the user has wired up (a smart plug, Home Assistant) does the work.
     // So the controls stay hidden unless a webhook actually subscribes to them.
-    @Published var chargeTriggerAvailable = false
+    @Published var subscribedTriggers: Set<String> = []
     @Published var chargeSchedules: [ChargeSchedule] = []
     @Published var triggerStatus: String?
+    var canStart: Bool { subscribedTriggers.contains("charge.requested") }
+    var canStop: Bool { subscribedTriggers.contains("charge.stopped") }
+    var chargeTriggerAvailable: Bool { canStart || canStop }
 
     private var bikeID: String?
     private var pendingState: String?     // OAuth `state` for the in-flight login
@@ -226,11 +229,17 @@ final class BikeStore: ObservableObject {
     func loadChargeTriggers() async {
         if let d = await get("/api/webhooks"),
            let subs = try? JSONDecoder().decode([WebhookSub].self, from: d) {
-            chargeTriggerAvailable = subs.contains {
-                $0.events.contains("charge.requested") || $0.events.contains("*")
+            var found: Set<String> = []
+            for sub in subs {
+                if sub.events.contains("*") {
+                    found.formUnion(["charge.requested", "charge.stopped"])
+                } else {
+                    found.formUnion(sub.events.filter { $0.hasPrefix("charge.") })
+                }
             }
+            subscribedTriggers = found
         } else {
-            chargeTriggerAvailable = false
+            subscribedTriggers = []
         }
         guard chargeTriggerAvailable else { chargeSchedules = []; return }
         if let d = await get("/api/schedules"),
@@ -239,23 +248,24 @@ final class BikeStore: ObservableObject {
         }
     }
 
-    func beginCharging() async {
+    func trigger(_ event: String) async {
         let r = await post("/api/trigger",
-                           ["event": "charge.requested", "data": ["source": "menubar"]])
+                           ["event": event, "data": ["source": "menubar"]])
         guard let (code, data) = r, code == 200,
               let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             triggerStatus = "Couldn't reach the backend"; return
         }
         let n = (j["delivered"] as? Int) ?? 0
         let ok = (j["ok"] as? Bool) ?? false
+        let verb = event == "charge.stopped" ? "Stop requested" : "Charging requested"
         triggerStatus = n == 0 ? "No webhook is listening"
-            : (ok ? "Charging requested" : "Sent, but \(n == 1 ? "the" : "a") webhook failed")
+            : (ok ? verb : "Sent, but \(n == 1 ? "the" : "a") webhook failed")
         Task { try? await Task.sleep(nanoseconds: 4_000_000_000); triggerStatus = nil }
     }
 
-    func scheduleCharging(at time: Date, daily: Bool) async {
+    func scheduleCharging(event: String, at time: Date, daily: Bool) async {
         let fmt = DateFormatter(); fmt.dateFormat = "HH:mm"
-        let body: [String: Any] = ["event": "charge.requested",
+        let body: [String: Any] = ["event": event,
                                    "at": fmt.string(from: time),
                                    "repeat": daily ? "daily" : "once"]
         guard let (code, _) = await post("/api/schedules", body), code == 201 else {
@@ -534,6 +544,7 @@ struct DetailView: View {
         bySettingHour: 2, minute: 0, second: 0, of: Date()) ?? Date()
     @State private var scheduleDaily = false
     @State private var showSchedule = false
+    @State private var scheduleEvent = "charge.requested"
     @State private var shareMetrics = Analytics.isEnabled
 
     private var useImperial: Bool { store.useImperial }
@@ -657,8 +668,20 @@ struct DetailView: View {
 
             if store.chargeTriggerAvailable {
                 Divider()
+                    .onAppear {
+                        if !store.canStart { scheduleEvent = "charge.stopped" }
+                    }
                 HStack {
-                    Button("Begin charging") { Task { await store.beginCharging() } }
+                    if store.canStart {
+                        Button("Begin charging") {
+                            Task { await store.trigger("charge.requested") }
+                        }
+                    }
+                    if store.canStop {
+                        Button("Stop charging") {
+                            Task { await store.trigger("charge.stopped") }
+                        }
+                    }
                     Button(showSchedule ? "Cancel" : "Schedule…") {
                         withAnimation { showSchedule.toggle() }
                     }
@@ -666,17 +689,25 @@ struct DetailView: View {
                 }.font(.caption)
 
                 if showSchedule {
-                    HStack {
-                        DatePicker("", selection: $scheduleTime,
-                                   displayedComponents: .hourAndMinute)
-                            .labelsHidden().datePickerStyle(.field)
-                        Toggle("Daily", isOn: $scheduleDaily)
-                            .toggleStyle(.checkbox)
-                        Button("Set") {
-                            Task {
-                                await store.scheduleCharging(at: scheduleTime,
-                                                             daily: scheduleDaily)
-                                withAnimation { showSchedule = false }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Picker("", selection: $scheduleEvent) {
+                            if store.canStart { Text("Begin").tag("charge.requested") }
+                            if store.canStop { Text("Stop").tag("charge.stopped") }
+                        }
+                        .pickerStyle(.segmented).labelsHidden()
+                        HStack {
+                            DatePicker("", selection: $scheduleTime,
+                                       displayedComponents: .hourAndMinute)
+                                .labelsHidden().datePickerStyle(.field)
+                            Toggle("Daily", isOn: $scheduleDaily)
+                                .toggleStyle(.checkbox)
+                            Button("Set") {
+                                Task {
+                                    await store.scheduleCharging(event: scheduleEvent,
+                                                                 at: scheduleTime,
+                                                                 daily: scheduleDaily)
+                                    withAnimation { showSchedule = false }
+                                }
                             }
                         }
                     }.font(.caption)
@@ -684,7 +715,8 @@ struct DetailView: View {
 
                 ForEach(store.chargeSchedules) { sched in
                     HStack {
-                        Text("\(sched.at) \(sched.repeat_ == "daily" ? "daily" : "once")")
+                        Text("\(sched.event == "charge.stopped" ? "Stop" : "Begin") at \(sched.at)"
+                             + (sched.repeat_ == "daily" ? " daily" : ""))
                             .font(.caption).foregroundColor(.secondary)
                         Spacer()
                         Button("Remove") { Task { await store.deleteSchedule(sched.id) } }
