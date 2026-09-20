@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse, Response, FileResponse
 from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 
-from . import auth, config, poller, tracks, webhooks
+from . import auth, config, poller, schedules, tracks, webhooks
 from .bosch import BoschClient, BoschError
 from .store import TokenStore
 
@@ -219,6 +219,40 @@ async def webhooks_test(request):
     return JSONResponse(result, status_code=200 if result["ok"] else 502)
 
 
+async def trigger(request):
+    """Raise a manual event (menu button). Closed set - see config.MANUAL_EVENTS."""
+    body = await request.json()
+    event = (body.get("event") or "").strip()
+    if event not in config.MANUAL_EVENTS:
+        return JSONResponse(
+            {"error": f"event must be one of {', '.join(config.MANUAL_EVENTS)}"},
+            status_code=400)
+    data = body.get("data") or {}
+    data.setdefault("source", body.get("source") or "api")
+    result = await poller.emit(request.app.state.http, event, data)
+    return JSONResponse(result)
+
+
+async def schedules_list(request):
+    return JSONResponse(schedules.list_all())
+
+
+async def schedules_create(request):
+    body = await request.json()
+    try:
+        item = schedules.add((body.get("event") or "").strip(),
+                             (body.get("at") or "").strip(),
+                             (body.get("repeat") or "once").strip())
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse(item, status_code=201)
+
+
+async def schedules_delete(request):
+    ok = schedules.delete(request.path_params["sched_id"])
+    return JSONResponse({"deleted": ok}, status_code=200 if ok else 404)
+
+
 async def events_list(request):
     limit = int(request.query_params.get("limit", 50))
     return JSONResponse(poller.recent_events(limit))
@@ -275,13 +309,16 @@ async def index(request):
 async def lifespan(app):
     app.state.http = httpx.AsyncClient(timeout=20)
     app.state.store = STORE
-    task = asyncio.create_task(poller.run_loop(app))
+    tasks = [asyncio.create_task(poller.run_loop(app)),
+             asyncio.create_task(poller.schedule_loop(app))]
     try:
         yield
     finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await app.state.http.aclose()
 
 
@@ -305,6 +342,10 @@ routes = [
     Route("/api/webhooks", webhooks_create, methods=["POST"]),
     Route("/api/webhooks/{sub_id}", webhooks_delete, methods=["DELETE"]),
     Route("/api/webhooks/{sub_id}/test", webhooks_test, methods=["POST"]),
+    Route("/api/trigger", trigger, methods=["POST"]),
+    Route("/api/schedules", schedules_list),
+    Route("/api/schedules", schedules_create, methods=["POST"]),
+    Route("/api/schedules/{sched_id}", schedules_delete, methods=["DELETE"]),
     Route("/api/events", events_list),
     Route("/api/poll", poll_now, methods=["POST"]),
     Route("/api/prefs", prefs_get),

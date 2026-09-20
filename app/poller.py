@@ -9,7 +9,7 @@ from pathlib import Path
 
 import httpx
 
-from . import config, events, notify, webhooks
+from . import config, events, notify, schedules, webhooks
 from .bosch import BoschClient, BoschError
 from .store import TokenStore
 
@@ -125,3 +125,34 @@ async def run_loop(app) -> None:
         except Exception as e:  # noqa: BLE001 - keep the loop alive
             _log_event({"event": "poll.crash", "at": time.time(), "detail": str(e)})
         await asyncio.sleep(config.POLL_INTERVAL)
+
+
+async def emit(http: httpx.AsyncClient, event: str, data: dict | None = None) -> dict:
+    """Raise an event that didn't come from a bike-state diff.
+
+    Manual triggers (the menu button) and schedules both land here, so they are
+    logged and fanned out over exactly the same path as detected events.
+    """
+    rec = {"event": event, "at": time.time(), "data": data or {}, "source": "manual"}
+    _log_event(rec)
+    subs = webhooks.subscribers_for(event)
+    results = await asyncio.gather(
+        *(webhooks.deliver(http, sub, rec) for sub in subs)) if subs else []
+    for sub, result in zip(subs, results):
+        _log_event({"event": "webhook.delivery", "at": time.time(),
+                    "target": sub["id"], "of": event, "result": result})
+    return {"event": event, "delivered": len(subs),
+            "ok": all(r.get("ok") for r in results) if results else True}
+
+
+async def schedule_loop(app) -> None:
+    """Fire scheduled triggers on wall-clock time, independent of bike polling."""
+    while True:
+        try:
+            for item in schedules.due():
+                await emit(app.state.http, item["event"],
+                           {"source": "schedule", "schedule_id": item["id"],
+                            "at": item["at"], "repeat": item["repeat"]})
+        except Exception as e:  # noqa: BLE001 - keep the loop alive
+            _log_event({"event": "schedule.crash", "at": time.time(), "detail": str(e)})
+        await asyncio.sleep(config.SCHEDULE_TICK)

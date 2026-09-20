@@ -697,8 +697,8 @@ $('#refresh').onclick = refreshAll;
   setInterval(() => api('/prefs').then(p=>apply(p.units)).catch(()=>{}), 4000);
 })();
 // ---- webhooks config modal ----
-const WH_EVENTS = ['battery.full','battery.low','battery.charging_started','battery.charging_stopped',
-  'charger.connected','charger.disconnected','ride.completed','firmware.changed'];
+const WH_EVENTS = ['battery.full','battery.target','battery.low','battery.charging_started','battery.charging_stopped',
+  'charger.connected','charger.disconnected','charge.requested','charge.stopped','ride.completed','firmware.changed'];
 function buildEventChecks(){
   const box = $('#whEvents'); if(box.dataset.built) return;
   box.innerHTML = `<label class="wh-chk"><input type="checkbox" data-all checked> All events</label>` +

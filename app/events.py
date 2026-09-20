@@ -52,6 +52,9 @@ def detect(prev: dict, cur: dict) -> list[dict]:
     if isinstance(pl, (int, float)) and isinstance(cl, (int, float)):
         if cl >= config.BATTERY_FULL_PCT > pl:
             emit("battery.full", {"level": cl})
+        target = config.BATTERY_TARGET_PCT
+        if cl >= target > pl:
+            emit("battery.target", {"level": cl, "target": target})
         low = config.BATTERY_LOW_PCT
         if pl > low >= cl:
             emit("battery.low", {"level": cl, "threshold": low})

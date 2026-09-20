@@ -24,6 +24,7 @@ WEBHOOKS_FILE = "bosch_webhooks.json"  # outbound webhook subscriptions
 POLLER_STATE_FILE = "bosch_poller_state.json"  # last-known snapshot per bike
 EVENTS_LOG_FILE = "bosch_events.jsonl"  # append-only event log
 PREFS_FILE = "bosch_prefs.json"  # shared UI prefs (units) synced across web + app
+SCHEDULES_FILE = "bosch_schedules.json"  # time-based manual triggers
 
 # Where those files live. Defaults to the repo root (dev), but the packaged
 # menu bar app sets BOSCH_FLOW_DATA_DIR to ~/Library/Application Support/Bosch
@@ -48,9 +49,18 @@ def data_path(filename: str) -> _Path:
 POLL_INTERVAL = 300     # seconds between poll cycles
 BATTERY_LOW_PCT = 20    # threshold for the battery.low event
 BATTERY_FULL_PCT = 100  # level considered "full"
+# Partial-charge target. Crossing this upward fires battery.target, which is the
+# hook for "stop at 80%" style automations that spare the pack a full top-off.
+BATTERY_TARGET_PCT = 80
 EVENTS_LOG_MAX = 500    # recent events kept for GET /api/events
 WEBHOOK_TIMEOUT = 10
 WEBHOOK_RETRIES = 3
+
+# --- Scheduled triggers -----------------------------------------------------
+SCHEDULE_TICK = 30      # seconds between due-schedule checks
+# Events a client may raise by hand (menu button or a schedule). Deliberately a
+# closed set: /api/trigger must not become a way to forge bike telemetry.
+MANUAL_EVENTS = ("charge.requested", "charge.stopped")
 
 # --- Local desktop notifications (macOS) ------------------------------------
 # Off by default now: the "Bosch Bar" menu bar app posts native notifications

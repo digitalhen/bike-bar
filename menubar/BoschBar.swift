@@ -125,6 +125,11 @@ enum LoginItem {
 
 // MARK: - Models
 struct Bike: Decodable { let id: String; let brand: String?; let drive_unit: String? }
+struct ChargeSchedule: Decodable, Identifiable {
+    let id: String; let event: String; let at: String; let repeat_: String
+    enum CodingKeys: String, CodingKey { case id, event, at, repeat_ = "repeat" }
+}
+struct WebhookSub: Decodable { let id: String; let events: [String] }
 struct RangeMode: Decodable { let mode: String?; let range_km: Double? }
 struct Battery: Decodable {
     let level_percent: Int?
@@ -163,6 +168,13 @@ final class BikeStore: ObservableObject {
 
     // shared units pref (metric/imperial), synced with the dashboard via /api/prefs
     @Published var useImperial = UserDefaults.standard.bool(forKey: "useImperial")
+
+    // Charge triggers. The app can't switch mains itself — it raises an event and
+    // whatever the user has wired up (a smart plug, Home Assistant) does the work.
+    // So the controls stay hidden unless a webhook actually subscribes to them.
+    @Published var chargeTriggerAvailable = false
+    @Published var chargeSchedules: [ChargeSchedule] = []
+    @Published var triggerStatus: String?
 
     private var bikeID: String?
     private var pendingState: String?     // OAuth `state` for the in-flight login
@@ -206,6 +218,57 @@ final class BikeStore: ObservableObject {
         guard imp != useImperial else { return }
         useImperial = imp
         UserDefaults.standard.set(imp, forKey: "useImperial")
+    }
+
+    // MARK: Charge triggers
+
+    /// Only surface the charge controls if something is listening for them.
+    func loadChargeTriggers() async {
+        if let d = await get("/api/webhooks"),
+           let subs = try? JSONDecoder().decode([WebhookSub].self, from: d) {
+            chargeTriggerAvailable = subs.contains {
+                $0.events.contains("charge.requested") || $0.events.contains("*")
+            }
+        } else {
+            chargeTriggerAvailable = false
+        }
+        guard chargeTriggerAvailable else { chargeSchedules = []; return }
+        if let d = await get("/api/schedules"),
+           let items = try? JSONDecoder().decode([ChargeSchedule].self, from: d) {
+            chargeSchedules = items
+        }
+    }
+
+    func beginCharging() async {
+        let r = await post("/api/trigger",
+                           ["event": "charge.requested", "data": ["source": "menubar"]])
+        guard let (code, data) = r, code == 200,
+              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            triggerStatus = "Couldn't reach the backend"; return
+        }
+        let n = (j["delivered"] as? Int) ?? 0
+        let ok = (j["ok"] as? Bool) ?? false
+        triggerStatus = n == 0 ? "No webhook is listening"
+            : (ok ? "Charging requested" : "Sent, but \(n == 1 ? "the" : "a") webhook failed")
+        Task { try? await Task.sleep(nanoseconds: 4_000_000_000); triggerStatus = nil }
+    }
+
+    func scheduleCharging(at time: Date, daily: Bool) async {
+        let fmt = DateFormatter(); fmt.dateFormat = "HH:mm"
+        let body: [String: Any] = ["event": "charge.requested",
+                                   "at": fmt.string(from: time),
+                                   "repeat": daily ? "daily" : "once"]
+        guard let (code, _) = await post("/api/schedules", body), code == 201 else {
+            triggerStatus = "Couldn't save the schedule"; return
+        }
+        triggerStatus = "Scheduled for \(fmt.string(from: time))"
+        await loadChargeTriggers()
+        Task { try? await Task.sleep(nanoseconds: 4_000_000_000); triggerStatus = nil }
+    }
+
+    func deleteSchedule(_ id: String) async {
+        _ = await post("/api/schedules/\(id)", [:], method: "DELETE")
+        await loadChargeTriggers()
     }
 
     /// Pull the shared units pref from the server (reflects a change made on the web).
@@ -313,6 +376,7 @@ final class BikeStore: ObservableObject {
         loggedIn = (sj["logged_in"] as? Bool) ?? false
         loginUser = sj["user"] as? String
         await loadUnits()   // keep units in sync with the dashboard
+        await loadChargeTriggers()
         guard loggedIn else {
             lastError = "Not logged in — choose “Log in / Update token”."
             return
@@ -466,6 +530,10 @@ struct DetailView: View {
     @ObservedObject var store: BikeStore
     @ObservedObject private var updater = UpdaterController.shared
     @State private var launchAtLogin = LoginItem.isEnabled
+    @State private var scheduleTime = Calendar.current.date(
+        bySettingHour: 2, minute: 0, second: 0, of: Date()) ?? Date()
+    @State private var scheduleDaily = false
+    @State private var showSchedule = false
     @State private var shareMetrics = Analytics.isEnabled
 
     private var useImperial: Bool { store.useImperial }
@@ -586,6 +654,48 @@ struct DetailView: View {
                 .toggleStyle(.checkbox).font(.caption)
                 .onChange(of: shareMetrics) { on in Analytics.setEnabled(on) }
                 .help("Sends an anonymous \"app is running\" ping (app version + macOS version only). No account, bike, or location data is ever sent.")
+
+            if store.chargeTriggerAvailable {
+                Divider()
+                HStack {
+                    Button("Begin charging") { Task { await store.beginCharging() } }
+                    Button(showSchedule ? "Cancel" : "Schedule…") {
+                        withAnimation { showSchedule.toggle() }
+                    }
+                    Spacer()
+                }.font(.caption)
+
+                if showSchedule {
+                    HStack {
+                        DatePicker("", selection: $scheduleTime,
+                                   displayedComponents: .hourAndMinute)
+                            .labelsHidden().datePickerStyle(.field)
+                        Toggle("Daily", isOn: $scheduleDaily)
+                            .toggleStyle(.checkbox)
+                        Button("Set") {
+                            Task {
+                                await store.scheduleCharging(at: scheduleTime,
+                                                             daily: scheduleDaily)
+                                withAnimation { showSchedule = false }
+                            }
+                        }
+                    }.font(.caption)
+                }
+
+                ForEach(store.chargeSchedules) { sched in
+                    HStack {
+                        Text("\(sched.at) \(sched.repeat_ == "daily" ? "daily" : "once")")
+                            .font(.caption).foregroundColor(.secondary)
+                        Spacer()
+                        Button("Remove") { Task { await store.deleteSchedule(sched.id) } }
+                            .font(.caption)
+                    }
+                }
+
+                if let status = store.triggerStatus {
+                    Text(status).font(.caption).foregroundColor(.secondary)
+                }
+            }
 
             Divider()
             HStack {
